@@ -15,7 +15,8 @@ import requests
 
 SITE = "https://www.leet.city"
 NEWS_URL = f"{SITE}/news"
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+# Meerdere webhooks mogelijk: één per regel (of gescheiden door komma's) in de secret
+WEBHOOK_URLS = [u.strip() for u in re.split(r"[\s,]+", os.environ["DISCORD_WEBHOOK_URL"]) if u.strip()]
 STATE_FILE = "seen.json"
 
 S = requests.Session()
@@ -136,9 +137,12 @@ def send_ping(new: list[dict]) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }],
     }
-    r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-    r.raise_for_status()
-    print(f"✅ Ping verstuurd voor {len(new)} nieuw(e) bericht(en)")
+    for i, url in enumerate(WEBHOOK_URLS, 1):
+        r = requests.post(url, json=payload, timeout=10)
+        if r.ok:
+            print(f"✅ Webhook {i}: ping verstuurd voor {len(new)} nieuw(e) bericht(en)")
+        else:
+            print(f"❌ Webhook {i} mislukt ({r.status_code}): {r.text[:200]}")
 
 
 def main() -> None:
