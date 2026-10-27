@@ -34,8 +34,6 @@ def from_sitemap() -> list[dict]:
         print(f"Sitemap mislukt: {e}")
         return []
     print(f"Sitemap: {len(locs)} urls")
-    for l in locs[:30]:
-        print(f"  sitemap: {l}")
     news = [l for l in locs if "news" in l.lower() and l.rstrip("/") != NEWS_URL]
     return [{"key": l, "title": None, "url": l} for l in news]
 
@@ -55,38 +53,59 @@ def from_api() -> list[dict]:
     html = S.get(NEWS_URL, timeout=20).text
     scripts = re.findall(r'src=["\'](/assets/[^"\']+\.js)["\']', html)
     scripts += re.findall(r'href=["\'](/assets/[^"\']+\.js)["\']', html)
-    candidates = set()
+    paths, bases = set(), set()
     for src in dict.fromkeys(scripts):
         try:
             js = S.get(urljoin(SITE, src), timeout=20).text
         except Exception:
             continue
-        for m in re.findall(r'["\'`]((?:https?://[^"\'`\s]*)?/[^"\'`\s]*news[^"\'`\s]*)["\'`]', js, re.I):
-            if "${" not in m and not m.endswith((".js", ".css", ".png")):
-                candidates.add(m)
-    print(f"API-kandidaten: {sorted(candidates)}")
+        for m in re.findall(r'["\'`](/news/[a-z/]+)["\'`]', js, re.I):
+            paths.add(m)
+        for m in re.findall(r'["\'`](https?://[^"\'`\s]+)["\'`]', js):
+            low = m.lower()
+            if "leet" in low or "api" in low:
+                if not low.endswith((".js", ".css", ".png", ".jpg", ".svg", ".webp")):
+                    bases.add(m.rstrip("/"))
+    print(f"Gevonden paden: {sorted(paths)}")
+    print(f"Gevonden servers in JS: {sorted(bases)}")
 
-    for path in sorted(candidates, key=lambda p: ("api" not in p.lower(), len(p))):
-        url = urljoin(SITE, path)
-        try:
-            r = S.get(url, timeout=20, headers={"Accept": "application/json"})
-            data = r.json()
-        except Exception:
-            continue
-        items = find_list(data)
-        if not items:
-            continue
-        print(f"✅ Nieuws-API gevonden: {url} ({len(items)} items)")
-        print(f"  voorbeeld: {json.dumps(items[0], ensure_ascii=False)[:500]}")
-        out = []
-        for it in items:
-            key = it.get("id") or it.get("slug") or it.get("title")
-            if key is None:
+    bases |= {"https://api.leet.city", "https://api.leet.city/api", "https://www.leet.city/api",
+              "https://leet.city/api", "https://api.leet.city/v1"}
+    paths = [p for p in ["/news/latest", "/news/latest/generic", "/news", "/news/pinned"]
+             if p in paths or p == "/news"] or ["/news/latest", "/news"]
+
+    for base in sorted(bases, key=lambda b: ("api" not in b.lower(), b)):
+        for path in paths:
+            url = base + path
+            try:
+                r = S.get(url, timeout=15, headers={"Accept": "application/json"})
+            except Exception as e:
+                print(f"  {url} -> fout ({type(e).__name__})")
                 continue
-            title = it.get("title") or it.get("name") or it.get("subject")
-            out.append({"key": f"api:{key}", "title": title, "url": NEWS_URL})
-        if out:
-            return out
+            ctype = r.headers.get("content-type", "")
+            print(f"  {url} -> {r.status_code} {ctype[:40]}")
+            if "json" not in ctype:
+                continue
+            try:
+                items = find_list(r.json())
+            except Exception:
+                continue
+            if not items:
+                print(f"    json maar geen lijst: {r.text[:300]}")
+                continue
+            print(f"✅ Nieuws-API gevonden: {url} ({len(items)} items)")
+            print(f"  voorbeeld: {json.dumps(items[0], ensure_ascii=False)[:500]}")
+            out = []
+            for it in items:
+                key = it.get("id") or it.get("slug") or it.get("title")
+                if key is None:
+                    continue
+                slug = it.get("slug")
+                title = it.get("title") or it.get("name") or it.get("subject")
+                link = f"{NEWS_URL}/{slug}" if slug else NEWS_URL
+                out.append({"key": f"api:{key}", "title": title, "url": link})
+            if out:
+                return out
     return []
 
 
