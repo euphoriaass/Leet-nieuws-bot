@@ -26,6 +26,27 @@ HEADERS = {
 }
 
 
+def debug_dump(r: requests.Response) -> None:
+    html = r.text
+    print("===== DEBUG =====")
+    print(f"Status: {r.status_code} | URL: {r.url} | Lengte: {len(html)}")
+    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    print(f"Titel: {title.group(1).strip() if title else '-'}")
+    hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, re.I)
+    print(f"Aantal links: {len(hrefs)}")
+    for h in hrefs[:40]:
+        print(f"  link: {h}")
+    for s in sorted(set(re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', html, re.I)))[:15]:
+        print(f"  script: {s}")
+    for a in sorted(set(re.findall(r'["\'](/api/[^"\'\s]+)["\']', html)))[:20]:
+        print(f"  api: {a}")
+    text = re.sub(r"<script.*?</script>|<style.*?</style>", "", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    print(f"Tekst (begin): {text[:1500]}")
+    print("=================")
+
+
 def get_news_links() -> list[str]:
     r = requests.get(NEWS_URL, headers=HEADERS, timeout=20)
     r.raise_for_status()
@@ -36,6 +57,8 @@ def get_news_links() -> list[str]:
             continue  # link naar de nieuwspagina zelf
         if url not in links:
             links.append(url)
+    if not links:
+        debug_dump(r)
     return links
 
 
