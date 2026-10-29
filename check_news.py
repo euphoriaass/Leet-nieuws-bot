@@ -187,45 +187,97 @@ def fetch_detail(item: dict) -> dict | None:
     return None
 
 
-def render_page_images(url: str) -> list[dict]:
-    """Opent de pagina in een echte (onzichtbare) Chrome en geeft alle afbeeldingen terug."""
+IMG_JS = """() => Array.from(document.images).map(i => ({
+    src: i.currentSrc || i.src, w: i.naturalWidth, h: i.naturalHeight }))"""
+
+
+def _norm(u):
+    return (u or "").split("?")[0].replace("://leet.city", "://www.leet.city")
+
+
+def _good_images(imgs, cover):
+    return [i for i in imgs if i["w"] >= 250 and i["h"] >= 120 and _norm(i["src"]) != _norm(cover)]
+
+
+def _load_and_collect(page, label):
+    page.wait_for_load_state("networkidle", timeout=30000)
+    page.wait_for_timeout(2000)
+    for _ in range(6):  # scrollen zodat lazy afbeeldingen laden
+        page.mouse.wheel(0, 2500)
+        page.wait_for_timeout(500)
+    page.wait_for_timeout(1500)
+    imgs = page.evaluate(IMG_JS)
+    print(f"   [{label}] {page.url} | titel: {page.title()[:60]} | {len(imgs)} afbeeldingen")
+    for i in imgs:
+        print(f"      {i['w']}x{i['h']} {i['src'][:150]}")
+    return imgs
+
+
+def render_article_images(item: dict, cover: str | None) -> list[dict]:
+    """Opent het artikel in een onzichtbare browser (zoals een mens) en geeft de afbeeldingen terug."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("   playwright niet geinstalleerd")
+        print("   playwright niet geinstalleerd (news.yml niet bijgewerkt?)")
         return []
+
+    raw = item.get("raw", {})
+    slug, nid = raw.get("slug"), raw.get("id")
+    urls = []
+    for ident in [nid, slug]:
+        if ident is not None:
+            urls.append(f"{NEWS_URL}/{ident}")
+    if nid is not None and slug:
+        urls += [f"{NEWS_URL}/{nid}/{slug}", f"{NEWS_URL}/{nid}-{slug}"]
+    urls = [u for u in dict.fromkeys(urls)]
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(user_agent=S.headers["User-Agent"],
                                     viewport={"width": 1280, "height": 2000})
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(2000)
-            for _ in range(5):  # naar beneden scrollen zodat alle afbeeldingen laden
-                page.mouse.wheel(0, 3000)
-                page.wait_for_timeout(500)
-            page.wait_for_timeout(1500)
-            imgs = page.evaluate("""() => Array.from(document.images).map(i => ({
-                src: i.currentSrc || i.src, w: i.naturalWidth, h: i.naturalHeight }))""")
+            api_calls = []
+            page.on("response", lambda r: api_calls.append(f"{r.status} {r.url}")
+                    if "/api/" in r.url else None)
+
+            # 1) als een mens: nieuwspagina openen en op het bericht klikken
+            try:
+                page.goto(NEWS_URL, timeout=60000)
+                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_timeout(1500)
+                page.get_by_text(item["title"], exact=False).first.click(timeout=10000)
+                imgs = _load_and_collect(page, "klik")
+                if _good_images(imgs, cover):
+                    browser.close()
+                    return imgs
+            except Exception as e:
+                print(f"   klikken mislukt: {type(e).__name__}")
+
+            # 2) directe adressen proberen
+            for url in urls:
+                try:
+                    page.goto(url, timeout=60000)
+                    imgs = _load_and_collect(page, "direct")
+                    if _good_images(imgs, cover):
+                        browser.close()
+                        return imgs
+                except Exception as e:
+                    print(f"   {url} mislukt: {type(e).__name__}")
+
+            print("   API-verzoeken van de site:")
+            for c in dict.fromkeys(api_calls):
+                print(f"      {c[:160]}")
             browser.close()
-            return imgs
     except Exception as e:
         print(f"   browser fout: {type(e).__name__}: {e}")
-        return []
+    return []
 
 
 def pick_images(item: dict, cover: str | None) -> list[str]:
-    url = item["url"]
-    print(f"   pagina openen: {url}")
-    imgs = render_page_images(url)
-    print(f"   {len(imgs)} afbeeldingen op de pagina")
-    norm = lambda u: (u or "").split("?")[0]
-    big = [i for i in imgs
-           if i["w"] >= 300 and i["h"] >= 150 and norm(i["src"]) != norm(cover)]
-    for i in big:
-        print(f"     {i['w']}x{i['h']} {i['src']}")
-    pngs = [i for i in big if ".png" in norm(i["src"]).lower()]
-    choice = (pngs or big)
+    imgs = render_article_images(item, cover)
+    good = _good_images(imgs, cover)
+    pngs = [i for i in good if ".png" in _norm(i["src"]).lower()]
+    choice = pngs or good
     if choice:
         print(f"   ✅ gekozen (laatste {'png' if pngs else 'afbeelding'}): {choice[-1]['src']}")
         return [choice[-1]["src"]]
