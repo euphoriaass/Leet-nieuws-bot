@@ -2,8 +2,13 @@ name: Leet nieuws checker
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # elke 10 minuten
-  workflow_dispatch:          # handmatig starten via de Actions-tab
+    - cron: "*/5 * * * *"   # elke 5 minuten
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Testmodus: stuur het nieuwste bericht opnieuw"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,9 +21,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -27,6 +32,7 @@ jobs:
       - name: Check nieuws
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TEST_MODE: ${{ inputs.test || 'false' }}
         run: python check_news.py
 
       - name: Opslaan wat al gezien is
@@ -34,4 +40,4 @@ jobs:
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
           git add seen.json
-          git diff --cached --quiet || (git commit -m "Update seen.json" && git push)
+          git diff --cached --quiet || (git commit -m "Update seen.json" && git pull --rebase && git push)
