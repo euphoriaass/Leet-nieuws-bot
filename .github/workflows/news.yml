@@ -27,7 +27,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install requests
+      - name: Installeren (requests + Chrome)
+        run: |
+          pip install requests playwright
+          python -m playwright install --with-deps chromium
 
       - name: Check nieuws
         env:
