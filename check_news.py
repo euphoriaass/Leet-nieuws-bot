@@ -127,37 +127,109 @@ def find_body_images(obj, cover: str | None = None) -> list[str]:
 
 
 API_BASE = None
+JS_TEMPLATES: set[str] = set()
+JS_SNIPPETS: set[str] = set()
+
+
+def _json_get(url: str):
+    try:
+        r = S.get(url, timeout=15, headers={"Accept": "application/json"})
+    except Exception as e:
+        print(f"   detail {url} -> fout ({type(e).__name__})")
+        return None
+    ok = r.ok and "json" in r.headers.get("content-type", "")
+    print(f"   detail {url} -> {r.status_code}{'' if ok else ' (geen json)' if r.ok else ''}")
+    if not ok:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    # lege of foutmeldings-json overslaan
+    if not data or (isinstance(data, dict) and set(data) <= {"error", "message", "status", "code"}):
+        return None
+    return data
 
 
 def fetch_detail(item: dict) -> dict | None:
-    """Haalt het volledige nieuwsbericht op via de API."""
+    """Haalt het volledige nieuwsbericht op via de API (probeert meerdere adresvormen)."""
     if not API_BASE:
         return None
-    for ident in dict.fromkeys([item.get("slug"), item.get("id")]):
-        if ident is None:
-            continue
-        url = f"{API_BASE}/news/{ident}"
-        try:
-            r = S.get(url, timeout=15, headers={"Accept": "application/json"})
-            if r.ok and "json" in r.headers.get("content-type", ""):
-                return r.json()
-            print(f"   detail {url} -> {r.status_code}")
-        except Exception as e:
-            print(f"   detail {url} -> fout ({type(e).__name__})")
+    slug, nid = item.get("slug"), item.get("id")
+    idents = [x for x in dict.fromkeys([slug, nid]) if x is not None]
+
+    candidates = []
+    # a) templates uit de JS van de site
+    for t in sorted(JS_TEMPLATES):
+        for ident in idents:
+            path = re.sub(r"\$\{[^}]*\}", str(ident), t, count=0)
+            path = path[path.lower().find("/news"):] if "/news" in path.lower() else path
+            if path.startswith("/"):
+                candidates.append(API_BASE + path)
+    # b) gangbare vormen
+    for ident in idents:
+        for pat in ["/news/{}", "/news/article/{}", "/news/articles/{}", "/news/post/{}",
+                    "/news/slug/{}", "/news/id/{}", "/news/view/{}", "/news/get/{}",
+                    "/news/latest/{}", "/news?slug={}", "/news?id={}", "/articles/{}", "/article/{}"]:
+            candidates.append(API_BASE + pat.format(ident))
+
+    for url in dict.fromkeys(candidates):
+        data = _json_get(url)
+        if data is not None:
+            print(f"   ✅ artikel gevonden via {url}")
+            if isinstance(data, dict):
+                print(f"      velden: {list(data.keys())}")
+            return data
+
+    print(f"   JS-templates: {sorted(JS_TEMPLATES)[:15]}")
+    for sn in sorted(JS_SNIPPETS)[:10]:
+        print(f"   JS: {sn}")
     return None
 
 
-def pick_images(raw: dict, cover: str | None) -> list[str]:
-    imgs = find_body_images(raw, cover)
-    if not imgs:
-        detail = fetch_detail(raw)
-        if detail is not None:
-            imgs = find_body_images(detail, cover)
-    if imgs:
-        for i in imgs:
-            print(f"   afbeelding uit bericht: {i}")
-        return imgs[:4]  # Discord toont max 4 als galerij
-    print(f"   geen afbeelding in bericht gevonden{' -> voorpagina-foto' if FALLBACK_TO_COVER and cover else ''}")
+def render_page_images(url: str) -> list[dict]:
+    """Opent de pagina in een echte (onzichtbare) Chrome en geeft alle afbeeldingen terug."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("   playwright niet geinstalleerd")
+        return []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(user_agent=S.headers["User-Agent"],
+                                    viewport={"width": 1280, "height": 2000})
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(2000)
+            for _ in range(5):  # naar beneden scrollen zodat alle afbeeldingen laden
+                page.mouse.wheel(0, 3000)
+                page.wait_for_timeout(500)
+            page.wait_for_timeout(1500)
+            imgs = page.evaluate("""() => Array.from(document.images).map(i => ({
+                src: i.currentSrc || i.src, w: i.naturalWidth, h: i.naturalHeight }))""")
+            browser.close()
+            return imgs
+    except Exception as e:
+        print(f"   browser fout: {type(e).__name__}: {e}")
+        return []
+
+
+def pick_images(item: dict, cover: str | None) -> list[str]:
+    url = item["url"]
+    print(f"   pagina openen: {url}")
+    imgs = render_page_images(url)
+    print(f"   {len(imgs)} afbeeldingen op de pagina")
+    norm = lambda u: (u or "").split("?")[0]
+    big = [i for i in imgs
+           if i["w"] >= 300 and i["h"] >= 150 and norm(i["src"]) != norm(cover)]
+    for i in big:
+        print(f"     {i['w']}x{i['h']} {i['src']}")
+    pngs = [i for i in big if ".png" in norm(i["src"]).lower()]
+    choice = (pngs or big)
+    if choice:
+        print(f"   ✅ gekozen (laatste {'png' if pngs else 'afbeelding'}): {choice[-1]['src']}")
+        return [choice[-1]["src"]]
+    print(f"   geen afbeelding gevonden{' -> voorpagina-foto' if FALLBACK_TO_COVER and cover else ''}")
     return [cover] if FALLBACK_TO_COVER and cover else []
 
 
@@ -174,6 +246,13 @@ def from_api() -> list[dict]:
         except Exception:
             continue
         paths.update(re.findall(r'["\'`](/news/[a-z/]+)["\'`]', js, re.I))
+        # template strings zoals `/news/${slug}` of `${API}/news/article/${id}`
+        for t in re.findall(r'`([^`]{0,80}news[^`]{0,80})`', js, re.I):
+            if "${" in t:
+                JS_TEMPLATES.add(t)
+        # stukjes code rond "news/" voor de log (debug)
+        for m in re.finditer(r'.{0,60}["\'`]/news/["\'`]?.{0,60}', js):
+            JS_SNIPPETS.add(m.group(0).replace("\n", " "))
         for m in re.findall(r'["\'`](https?://[^"\'`\s]+)["\'`]', js):
             low = m.lower()
             if ("leet" in low or "api" in low) and not low.endswith((".js", ".css", ".svg") + IMG_EXT):
@@ -246,7 +325,7 @@ def send_ping(new: list[dict]) -> None:
     embeds = []
     for n in new[:10]:  # Discord max 10 embeds per bericht
         print(f"Bericht: {n['title']}")
-        images = pick_images(n["raw"], n["image"])
+        images = pick_images(n, n["image"])
         embed = {
             "title": f"📰 {n['title']}"[:256],
             "url": n["url"],
