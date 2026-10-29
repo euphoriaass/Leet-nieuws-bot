@@ -96,8 +96,8 @@ BODY_IMG_PATTERNS = [
 ]
 
 
-def find_body_image(obj, cover: str | None = None) -> str | None:
-    """Zoekt de eerste afbeelding IN de tekst van het bericht (niet de voorpagina-foto)."""
+def find_body_images(obj, cover: str | None = None) -> list[str]:
+    """Zoekt alle afbeeldingen IN de tekst van het bericht (niet de voorpagina-foto)."""
     strings = []
 
     def walk(o, key=""):
@@ -113,13 +113,17 @@ def find_body_image(obj, cover: str | None = None) -> str | None:
             strings.append(o)
 
     walk(obj)
+    found = []
     for text in strings:
+        hits = []
         for pat in BODY_IMG_PATTERNS:
-            for m in re.findall(pat, text, re.I):
-                url = urljoin(SITE, htmllib.unescape(m.strip()))
-                if url != cover:
-                    return url
-    return None
+            for m in re.finditer(pat, text, re.I):
+                hits.append((m.start(), m.group(1)))
+        for _, raw in sorted(hits):  # volgorde zoals in het artikel
+            url = urljoin(SITE, htmllib.unescape(raw.strip()))
+            if url != cover and url not in found:
+                found.append(url)
+    return found
 
 
 API_BASE = None
@@ -143,17 +147,18 @@ def fetch_detail(item: dict) -> dict | None:
     return None
 
 
-def pick_image(raw: dict, cover: str | None) -> str | None:
-    img = find_body_image(raw, cover)
-    if not img:
+def pick_images(raw: dict, cover: str | None) -> list[str]:
+    imgs = find_body_images(raw, cover)
+    if not imgs:
         detail = fetch_detail(raw)
         if detail is not None:
-            img = find_body_image(detail, cover)
-    if img:
-        print(f"   afbeelding uit bericht: {img}")
-        return img
+            imgs = find_body_images(detail, cover)
+    if imgs:
+        for i in imgs:
+            print(f"   afbeelding uit bericht: {i}")
+        return imgs[:4]  # Discord toont max 4 als galerij
     print(f"   geen afbeelding in bericht gevonden{' -> voorpagina-foto' if FALLBACK_TO_COVER and cover else ''}")
-    return cover if FALLBACK_TO_COVER else None
+    return [cover] if FALLBACK_TO_COVER and cover else []
 
 
 # ---------- nieuws ophalen ----------
@@ -241,7 +246,7 @@ def send_ping(new: list[dict]) -> None:
     embeds = []
     for n in new[:10]:  # Discord max 10 embeds per bericht
         print(f"Bericht: {n['title']}")
-        n["image"] = pick_image(n["raw"], n["image"])
+        images = pick_images(n["raw"], n["image"])
         embed = {
             "title": f"📰 {n['title']}"[:256],
             "url": n["url"],
@@ -251,9 +256,13 @@ def send_ping(new: list[dict]) -> None:
         }
         if n.get("text"):
             embed["description"] = n["text"]
-        if n.get("image"):
-            embed["image"] = {"url": n["image"]}
+        if images:
+            embed["image"] = {"url": images[0]}
         embeds.append(embed)
+        # extra afbeeldingen met dezelfde url -> Discord voegt ze samen tot een galerij
+        for extra in images[1:]:
+            embeds.append({"url": n["url"], "image": {"url": extra}})
+    embeds = embeds[:10]
 
     payload = {
         "username": "Leet Nieuws",
