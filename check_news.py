@@ -85,9 +85,81 @@ def find_text(item: dict) -> str | None:
     return None
 
 
+# Zet op False als je NOOIT de voorpagina-foto wilt (dan geen afbeelding als het bericht er geen heeft)
+FALLBACK_TO_COVER = True
+
+BODY_IMG_PATTERNS = [
+    r'<img[^>]+src=["\']([^"\']+)["\']',            # HTML
+    r'!\[[^\]]*\]\(([^)\s]+)\)',                     # Markdown
+    r'\[img[^\]]*\]\s*([^\[\s]+)\s*\[/img\]',         # BBCode
+    r'(https?://[^\s"\'<>()]+\.(?:png|jpe?g|gif|webp))', # losse link
+]
+
+
+def find_body_image(obj, cover: str | None = None) -> str | None:
+    """Zoekt de eerste afbeelding IN de tekst van het bericht (niet de voorpagina-foto)."""
+    strings = []
+
+    def walk(o, key=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in IMAGE_KEYS:
+                    continue  # voorpagina-/thumbnailvelden overslaan
+                walk(v, k)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, key)
+        elif isinstance(o, str) and len(o) > 20:
+            strings.append(o)
+
+    walk(obj)
+    for text in strings:
+        for pat in BODY_IMG_PATTERNS:
+            for m in re.findall(pat, text, re.I):
+                url = urljoin(SITE, htmllib.unescape(m.strip()))
+                if url != cover:
+                    return url
+    return None
+
+
+API_BASE = None
+
+
+def fetch_detail(item: dict) -> dict | None:
+    """Haalt het volledige nieuwsbericht op via de API."""
+    if not API_BASE:
+        return None
+    for ident in dict.fromkeys([item.get("slug"), item.get("id")]):
+        if ident is None:
+            continue
+        url = f"{API_BASE}/news/{ident}"
+        try:
+            r = S.get(url, timeout=15, headers={"Accept": "application/json"})
+            if r.ok and "json" in r.headers.get("content-type", ""):
+                return r.json()
+            print(f"   detail {url} -> {r.status_code}")
+        except Exception as e:
+            print(f"   detail {url} -> fout ({type(e).__name__})")
+    return None
+
+
+def pick_image(raw: dict, cover: str | None) -> str | None:
+    img = find_body_image(raw, cover)
+    if not img:
+        detail = fetch_detail(raw)
+        if detail is not None:
+            img = find_body_image(detail, cover)
+    if img:
+        print(f"   afbeelding uit bericht: {img}")
+        return img
+    print(f"   geen afbeelding in bericht gevonden{' -> voorpagina-foto' if FALLBACK_TO_COVER and cover else ''}")
+    return cover if FALLBACK_TO_COVER else None
+
+
 # ---------- nieuws ophalen ----------
 
 def from_api() -> list[dict]:
+    global API_BASE
     page = S.get(NEWS_URL, timeout=20).text
     scripts = re.findall(r'(?:src|href)=["\'](/assets/[^"\']+\.js)["\']', page)
     paths, bases = set(), set()
@@ -118,6 +190,7 @@ def from_api() -> list[dict]:
                 continue
             if not items:
                 continue
+            API_BASE = base
             print(f"✅ Nieuws-API: {url} ({len(items)} items)")
             print(f"   velden: {list(items[0].keys())}")
             out = []
@@ -132,6 +205,7 @@ def from_api() -> list[dict]:
                     "url": f"{NEWS_URL}/{slug}" if slug else NEWS_URL,
                     "text": find_text(it),
                     "image": find_image(it),
+                    "raw": it,
                 })
             if out:
                 return out
@@ -144,7 +218,7 @@ def from_sitemap() -> list[dict]:
     except Exception:
         return []
     news = [l for l in locs if "/news/" in l.lower() and l.rstrip("/") != NEWS_URL]
-    return [{"key": l, "title": "Nieuw nieuwsbericht", "url": l, "text": None, "image": None} for l in news]
+    return [{"key": l, "title": "Nieuw nieuwsbericht", "url": l, "text": None, "image": None, "raw": {}} for l in news]
 
 
 # ---------- opslaan ----------
@@ -166,6 +240,8 @@ def save_seen(keys: list[str]) -> None:
 def send_ping(new: list[dict]) -> None:
     embeds = []
     for n in new[:10]:  # Discord max 10 embeds per bericht
+        print(f"Bericht: {n['title']}")
+        n["image"] = pick_image(n["raw"], n["image"])
         embed = {
             "title": f"📰 {n['title']}"[:256],
             "url": n["url"],
@@ -202,7 +278,7 @@ def main() -> None:
         sys.exit(1)
 
     latest = items[0]
-    print(f"Nieuwste: {latest['title']} | afbeelding: {latest['image'] or 'geen gevonden'}")
+    print(f"Nieuwste: {latest['title']}")
 
     if TEST_MODE:
         print("🧪 Testmodus: nieuwste bericht opnieuw versturen")
