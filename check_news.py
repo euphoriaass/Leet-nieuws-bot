@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 
@@ -273,14 +273,31 @@ def render_article_images(item: dict, cover: str | None) -> list[dict]:
     return []
 
 
+def article_images(item: dict) -> list[str]:
+    """Haalt de plaatjes uit de tekst van het artikel via /api/news/id/<id>.
+    Bij Catch the Pokémon: eerst de header, daarna het silhouet."""
+    nid = item.get("raw", {}).get("id")
+    if nid is None:
+        return []
+    try:
+        r = S.get(f"{SITE}/api/news/id/{nid}", timeout=20, headers={"Accept": "application/json"})
+        r.raise_for_status()
+        story = r.json().get("fullStory", "")
+    except Exception as e:
+        print(f"   artikel {nid} ophalen mislukt: {type(e).__name__}: {e}")
+        return []
+    imgs = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', story, re.I)
+    imgs = [urljoin(SITE, htmllib.unescape(u)) for u in imgs]
+    print(f"   afbeeldingen in artikel: {imgs}")
+    return imgs
+
+
 def pick_images(item: dict, cover: str | None) -> list[str]:
-    imgs = render_article_images(item, cover)
-    good = _good_images(imgs, cover)
-    pngs = [i for i in good if ".png" in _norm(i["src"]).lower()]
-    choice = pngs or good
-    if choice:
-        print(f"   ✅ gekozen (laatste {'png' if pngs else 'afbeelding'}): {choice[-1]['src']}")
-        return [choice[-1]["src"]]
+    imgs = [u for u in article_images(item) if _norm(u) != _norm(cover)]
+    if imgs:
+        # het laatste plaatje in het artikel is het silhouet (het eerste is de header)
+        print(f"   ✅ gekozen (laatste afbeelding uit artikel): {imgs[-1]}")
+        return [imgs[-1]]
     print(f"   geen afbeelding gevonden{' -> voorpagina-foto' if FALLBACK_TO_COVER and cover else ''}")
     return [cover] if FALLBACK_TO_COVER and cover else []
 
@@ -334,11 +351,15 @@ def from_api() -> list[dict]:
                 key = it.get("id") or it.get("slug") or it.get("title")
                 if key is None:
                     continue
-                slug = it.get("slug") or it.get("id")
+                nid, slug = it.get("id"), it.get("slug")
+                if nid is not None and slug:
+                    link = f"{NEWS_URL}/{nid}-{quote(slug)}"  # zo linkt de site zelf
+                else:
+                    link = f"{NEWS_URL}/{slug or nid}" if (slug or nid) else NEWS_URL
                 out.append({
                     "key": f"api:{key}",
                     "title": it.get("title") or it.get("name") or it.get("subject") or "Nieuw nieuwsbericht",
-                    "url": f"{NEWS_URL}/{slug}" if slug else NEWS_URL,
+                    "url": link,
                     "text": find_text(it),
                     "image": find_image(it),
                     "raw": it,
@@ -397,7 +418,7 @@ def send_ping(new: list[dict]) -> None:
 
     payload = {
         "username": "Leet Nieuws",
-        "content": f"@everyone 📰 Er staat een nieuw nieuwsbericht op Leet! {NEWS_URL}",
+        "content": f"@everyone 📰 Er staat een nieuw nieuwsbericht op Leet! {new[0]['url']}",
         "allowed_mentions": {"parse": ["everyone"]},
         "embeds": embeds,
     }
